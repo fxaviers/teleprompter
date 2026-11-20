@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#09090B" />
+  <rect x="28" y="28" width="456" height="456" rx="92" fill="none" stroke="#18181B" stroke-width="6" />
+  <!-- Camera lens focus ring -->
+  <circle cx="256" cy="116" r="30" fill="#18181B" stroke="#27272A" stroke-width="4" />
+  <circle cx="256" cy="116" r="14" fill="#38BDF8" />
+  <circle cx="261" cy="111" r="4" fill="#E0F2FE" />
+  <!-- Teleprompter lines with active focus highlight -->
+  <rect x="116" y="196" width="280" height="24" rx="12" fill="#3F3F46" />
+  <rect x="88" y="256" width="336" height="36" rx="18" fill="#38BDF8" />
+  <rect x="128" y="328" width="256" height="24" rx="12" fill="#A1A1AA" />
+  <rect x="156" y="384" width="200" height="20" rx="10" fill="#52525B" />
+</svg>
