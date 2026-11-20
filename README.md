@@ -12,12 +12,12 @@ Construído com HTML5, CSS3 moderno e JavaScript ES Modules puros (zero build, z
 - **Avanço automático por voz (SpeechRecognition)**: acompanha sua fala em tempo real via Web Speech API (otimizado para o Chrome no Android), destacando a palavra atual sem poluir o DOM e tolerando pequenas variações ou pausas.
 - **Economia máxima de bateria (Zero Idle CPU)**: nenhum loop `requestAnimationFrame` roda quando pausado, quando o app está em segundo plano ou após o texto estabilizar na posição falada.
 - **Gerenciador de roteiros offline**: crie múltiplos roteiros salvos automaticamente no `localStorage`, veja estimativa de tempo de fala e importe/exporte arquivos `.txt`.
-- **Tela sempre ligada (Wake Lock)** e modo **Tela Cheia** com ocultação automática dos controles durante a gravação.
-- **PWA instalável**: adicione à tela inicial do Android para abrir sem barras do navegador e funcionar offline.
+- **Tela sempre ligada (Wake Lock)** com ocultação automática dos controles durante a gravação.
+- **PWA instalável**: adicione à tela inicial do Android para abrir em tela cheia sem barras do navegador e funcionar offline.
 
 ## Dicas de Uso no Chrome (Android)
 
-1. **Posição acima da câmera**: abra **Ajustes (`Aa`)** e ajuste **Linha de foco (câmera)** para ~`20%–35%` em retrato ou conforme a altura do furo da câmera no seu aparelho, mantendo seus olhos alinhados à lente.
+1. **Posição acima da câmera**: toque em **`Aa`** no topo da tela e ajuste **Linha de foco (câmera)** para ~`20%–35%` em retrato ou conforme a altura do furo da câmera no seu aparelho, mantendo seus olhos alinhados à lente.
 2. **Reconhecimento de voz offline**: nas configurações do Android (*Sistema → Idiomas → Reconhecimento de voz*), baixe o pacote offline de **Português (Brasil)** para reduzir latência e funcionar sem internet.
 3. **Instalação como app**: no Chrome do Android, toque em **Instalar** na barra superior (ou no menu `⋮` → *Adicionar à tela inicial*).
 
@@ -30,7 +30,6 @@ Construído com HTML5, CSS3 moderno e JavaScript ES Modules puros (zero build, z
 | `Seta ↓` / `Seta ←` | Diminuir velocidade |
 | `R` | Voltar ao início do roteiro |
 | `V` | Ativar / Desativar avanço por voz |
-| `F` | Alternar tela cheia |
 | `M` | Espelhar texto horizontalmente |
 
 > **Dica no toque**: um toque na tela revela os controles ocultos; toque duplo inicia ou pausa a rolagem.

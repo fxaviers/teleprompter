@@ -35,10 +35,8 @@ const els = {
   liveStatus: $('#live-status'),
 
   btnOpenEditor: $('#btn-open-editor'),
-  btnEditScript: $('#btn-edit-script'),
   activeScriptTitle: $('#active-script-title'),
   btnInstall: $('#btn-install-app'),
-  btnFullscreen: $('#btn-fullscreen'),
 
   voiceChip: $('#voice-chip'),
   voiceChipText: $('#voice-chip-text'),
@@ -474,22 +472,6 @@ els.btnVoice.addEventListener('click', toggleVoiceMode);
 els.btnSpeedDown.addEventListener('click', () => adjustSpeed(-0.25));
 els.btnSpeedUp.addEventListener('click', () => adjustSpeed(0.25));
 
-els.btnFullscreen.addEventListener('click', async () => {
-  try {
-    if (!document.fullscreenElement) {
-      await document.documentElement.requestFullscreen();
-    } else {
-      await document.exitFullscreen();
-    }
-  } catch {
-    announce('Tela cheia indisponível');
-  }
-});
-
-document.addEventListener('fullscreenchange', () => {
-  els.btnFullscreen.setAttribute('aria-pressed', String(Boolean(document.fullscreenElement)));
-});
-
 // Single tap on stage reveals HUD; double tap toggles playback (without interfering with drags)
 let lastTapTime = 0;
 let tapStartPos = null;
@@ -677,14 +659,12 @@ els.editorDialog.addEventListener('close', () => {
   scheduleHudAutoHide();
 });
 
-for (const openBtn of [els.btnOpenEditor, els.btnEditScript]) {
-  openBtn.addEventListener('click', () => {
-    cancelCountdown();
-    prompter.pause();
-    revealHud();
-    loadActiveScriptIntoEditor();
-  });
-}
+els.btnOpenEditor.addEventListener('click', () => {
+  cancelCountdown();
+  prompter.pause();
+  revealHud();
+  loadActiveScriptIntoEditor();
+});
 
 /* ---------------- Keyboard & Clicker Shortcuts ---------------- */
 
@@ -732,10 +712,6 @@ document.addEventListener('keydown', (event) => {
       event.preventDefault();
       toggleVoiceMode();
       break;
-    case 'KeyF':
-      event.preventDefault();
-      els.btnFullscreen.click();
-      break;
     case 'KeyM':
       event.preventDefault();
       updateSetting({ mirror: !settings.mirror });
@@ -746,19 +722,57 @@ document.addEventListener('keydown', (event) => {
 /* ---------------- PWA Install & Service Worker ---------------- */
 
 const supportsWebInstall = typeof Navigator.prototype.install === 'function';
-const isStandalone =
-  window.matchMedia('(display-mode: standalone)').matches ||
-  window.matchMedia('(display-mode: fullscreen)').matches;
+let relatedAppInstalled = false;
+const DISPLAY_MODE_QUERIES = [
+  '(display-mode: standalone)',
+  '(display-mode: fullscreen)',
+  '(display-mode: minimal-ui)',
+  '(display-mode: window-controls-overlay)',
+].map((query) => window.matchMedia(query));
 
-if (supportsWebInstall && !isStandalone) {
-  els.btnInstall.hidden = false;
+function isInstalledApp() {
+  return (
+    relatedAppInstalled ||
+    DISPLAY_MODE_QUERIES.some((mq) => mq.matches) ||
+    window.navigator.standalone === true ||
+    document.referrer.startsWith('android-app://')
+  );
 }
+
+function syncInstallButtonVisibility() {
+  if (isInstalledApp()) {
+    els.btnInstall.hidden = true;
+    return;
+  }
+  if (supportsWebInstall || deferredInstallPrompt) {
+    els.btnInstall.hidden = false;
+  }
+}
+
+for (const mq of DISPLAY_MODE_QUERIES) {
+  mq.addEventListener('change', syncInstallButtonVisibility);
+}
+
+if (typeof navigator.getInstalledRelatedApps === 'function') {
+  navigator.getInstalledRelatedApps()
+    .then((apps) => {
+      if (apps?.length > 0) {
+        relatedAppInstalled = true;
+        syncInstallButtonVisibility();
+      }
+    })
+    .catch(() => {
+      // Ignore unsupported environments.
+    });
+}
+
+syncInstallButtonVisibility();
 
 window.addEventListener('beforeinstallprompt', (event) => {
   event.preventDefault();
   deferredInstallPrompt = event;
-  if (!supportsWebInstall && !isStandalone) {
-    els.btnInstall.hidden = false;
+  if (!supportsWebInstall) {
+    syncInstallButtonVisibility();
   }
 });
 

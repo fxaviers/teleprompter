@@ -22,10 +22,11 @@
         class="pill-btn script-pill"
         command="show-modal"
         commandfor="editor-dialog"
-        aria-label="Abrir roteiros"
+        aria-label="Editar roteiro"
+        title="Editar roteiro"
       >
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M4 6h16M4 12h12M4 18h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          <path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
         <span id="active-script-title" class="script-pill-title">Carregando...</span>
       </button>
@@ -44,33 +45,14 @@
         </button>
 
         <button
-          id="btn-fullscreen"
+          id="btn-settings"
           type="button"
-          class="icon-btn"
-          aria-pressed="false"
-          aria-label="Tela cheia"
-          title="Tela cheia (F)"
+          class="icon-btn settings-trigger"
+          popovertarget="settings-sheet"
+          aria-label="Ajustes de texto e exibição"
+          title="Ajustes de leitura"
         >
-          <svg class="icon icon-fs-enter" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <svg class="icon icon-fs-exit" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-
-        <button
-          id="btn-edit-script"
-          type="button"
-          class="icon-btn"
-          command="show-modal"
-          commandfor="editor-dialog"
-          aria-label="Editar roteiro"
-          title="Editar roteiro"
-        >
-          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+          <span class="aa-glyph" aria-hidden="true">Aa</span>
         </button>
       </div>
     </header>
@@ -186,21 +168,6 @@
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
             </svg>
-          </button>
-        </div>
-
-        <span role="separator" aria-orientation="vertical" class="toolbar-sep"></span>
-
-        <div role="group" aria-label="Ajustes" class="toolbar-group">
-          <button
-            id="btn-settings"
-            type="button"
-            class="icon-btn settings-trigger"
-            popovertarget="settings-sheet"
-            aria-label="Ajustes de texto e exibição"
-            title="Ajustes de leitura"
-          >
-            <span class="aa-glyph" aria-hidden="true">Aa</span>
           </button>
         </div>
       </div>

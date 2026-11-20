@@ -106,6 +106,10 @@ button,
   outline-offset: 2px;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .sr-only {
   position: absolute;
   inline-size: 1px;
@@ -214,7 +218,7 @@ body.hud-hidden .hud > * {
   padding-block: 0.35rem;
   font-size: 0.875rem;
   font-weight: 500;
-  max-inline-size: min(50vw, 18rem);
+  max-inline-size: min(62vw, 22rem);
 }
 
 .script-pill-title {
@@ -226,6 +230,12 @@ body.hud-hidden .hud > * {
 .install-btn {
   border-color: rgba(56, 189, 248, 0.45);
   color: var(--accent);
+}
+
+@media (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui), (display-mode: window-controls-overlay) {
+  #btn-install-app {
+    display: none !important;
+  }
 }
 
 .icon-btn {
@@ -250,19 +260,6 @@ body.hud-hidden .hud > * {
 .pill-btn:active,
 .play-btn:active {
   opacity: 0.84;
-}
-
-/* Fullscreen button icon swap */
-#btn-fullscreen .icon-fs-exit {
-  display: none;
-}
-
-#btn-fullscreen[aria-pressed="true"] .icon-fs-enter {
-  display: none;
-}
-
-#btn-fullscreen[aria-pressed="true"] .icon-fs-exit {
-  display: block;
 }
 
 /* Voice Status Chip */
