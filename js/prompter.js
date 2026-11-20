@@ -3,8 +3,8 @@ import { normalizeWord } from './voice.js';
 const WORD_REGEX = /\p{L}[\p{L}\p{N}'’-]*|\p{N}+/gu;
 
 /**
- * High-efficiency teleprompter engine with zero idle CPU usage and
- * CSS Custom Highlight API word tracking.
+ * High-efficiency teleprompter engine with zero idle CPU usage,
+ * CSS Custom Highlight API word tracking, and fluid voice-pacing physics.
  */
 export class PrompterEngine {
   constructor({ stageEl, contentEl, onTokenCursorChange, onPlaybackStateChange }) {
@@ -25,10 +25,22 @@ export class PrompterEngine {
     this.lastWrittenScrollTop = 0;
     this.targetScrollY = null;
     this.maxScroll = 0;
+    this.lineHeightPx = 64;
+
+    // Fluid voice-tracking physics state
+    this.voiceTrackingActive = false;
+    this.voiceAnchorY = null;
+    this.voiceVelocity = 0;
+    this.estimatedPacePxPerSec = 52;
+    this.lastVoiceMatchTime = 0;
+    this.lastSpeechPulseTime = 0;
+    this.lastPaceAnchorY = null;
+    this.lastPaceTime = 0;
 
     this.rafId = 0;
     this.lastTimestamp = 0;
     this.isUserTouching = false;
+    this.hasManualScroll = false;
     this.touchReleaseTimer = 0;
     this.manualSyncTimer = 0;
 
@@ -87,6 +99,7 @@ export class PrompterEngine {
   setText(text) {
     this.pause();
     this.targetScrollY = null;
+    this._resetVoicePhysics();
     this.clearHighlights();
 
     this.tokens = [];
@@ -94,6 +107,7 @@ export class PrompterEngine {
     this.cursorIndex = 0;
     this.virtualScrollY = 0;
     this.lastWrittenScrollTop = 0;
+    this.hasManualScroll = false;
 
     const paragraphs = (text || '')
       .replace(/\r\n/g, '\n')
@@ -165,6 +179,11 @@ export class PrompterEngine {
     if (this.virtualScrollY > this.maxScroll) {
       this.virtualScrollY = this.maxScroll;
     }
+
+    const cs = getComputedStyle(this.contentEl);
+    const parsedLh = parseFloat(cs.lineHeight);
+    const parsedFs = parseFloat(cs.fontSize) || 44;
+    this.lineHeightPx = Number.isFinite(parsedLh) ? parsedLh : parsedFs * 1.45;
   }
 
   setSpeed(speed) {
@@ -173,6 +192,43 @@ export class PrompterEngine {
 
   setFocusLine(pct) {
     this.focusLinePct = Math.max(15, Math.min(75, Number(pct) || 42));
+  }
+
+  /**
+   * Enables or disables fluid voice-following physics.
+   * @param {boolean} active
+   */
+  setVoiceTrackingActive(active) {
+    this.voiceTrackingActive = Boolean(active);
+    this._resetVoicePhysics();
+    if (!this.voiceTrackingActive && !this.isPlaying && this.targetScrollY === null) {
+      this._stopRaf();
+    }
+  }
+
+  _resetVoicePhysics() {
+    this.voiceAnchorY = null;
+    this.voiceVelocity = 0;
+    this.lastVoiceMatchTime = 0;
+    this.lastSpeechPulseTime = 0;
+    this.lastPaceAnchorY = null;
+    this.lastPaceTime = 0;
+  }
+
+  /**
+   * Keeps fluid voice-coasting alive during interim speech activity only when
+   * recently anchored to a valid script match (immune to ambient noise).
+   */
+  notifyVoiceActivity() {
+    if (!this.voiceTrackingActive || this.isPlaying || this.isUserTouching) return;
+    const now = performance.now();
+    if (this.lastVoiceMatchTime <= 0 || now - this.lastVoiceMatchTime >= 2200) {
+      return;
+    }
+    this.lastSpeechPulseTime = now;
+    if (this.voiceAnchorY !== null) {
+      this._ensureRaf();
+    }
   }
 
   /**
@@ -195,6 +251,8 @@ export class PrompterEngine {
     }
 
     this.targetScrollY = null;
+    this._resetVoicePhysics();
+    this.hasManualScroll = false;
     this.virtualScrollY = this.stageEl.scrollTop;
     this.lastWrittenScrollTop = this.virtualScrollY;
     this.isPlaying = true;
@@ -206,7 +264,7 @@ export class PrompterEngine {
   pause({ reachedEnd = false } = {}) {
     const wasPlaying = this.isPlaying;
     this.isPlaying = false;
-    if (this.targetScrollY === null) {
+    if (this.targetScrollY === null && (!this.voiceTrackingActive || this.voiceAnchorY === null)) {
       this._stopRaf();
     }
     if (wasPlaying || reachedEnd) {
@@ -217,6 +275,8 @@ export class PrompterEngine {
   reset() {
     this.pause();
     this.targetScrollY = null;
+    this._resetVoicePhysics();
+    this.hasManualScroll = false;
     this.cursorIndex = 0;
     this.virtualScrollY = 0;
     this.lastWrittenScrollTop = 0;
@@ -273,7 +333,6 @@ export class PrompterEngine {
 
   /**
    * Binary-searches indexed tokens to find the word closest to the reading focus line.
-   * Performs ~10 getBoundingClientRect calls even on long scripts.
    * @returns {number}
    */
   findTokenAtFocusLine() {
@@ -310,12 +369,60 @@ export class PrompterEngine {
   }
 
   /**
-   * Highlights token at `index` and smoothly scrolls it to the camera focus line.
+   * Returns the token index bounds currently visible inside the viewport (plus a small
+   * lookahead buffer below the bottom edge) to break out of off-window voice deadlocks.
+   * @returns {{start: number, end: number} | null}
+   */
+  getVisibleTokenRange() {
+    if (this.tokens.length === 0) return null;
+
+    const stageRect = this.stageEl.getBoundingClientRect();
+    const topY = stageRect.top;
+    const bottomY = stageRect.bottom;
+
+    // Lower bound: first token with centerY >= topY
+    let lo = 0;
+    let hi = this.tokens.length - 1;
+    let startIdx = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const y = this._getTokenCenterY(this.tokens[mid]);
+      if (y < topY) {
+        lo = mid + 1;
+      } else {
+        startIdx = mid;
+        hi = mid - 1;
+      }
+    }
+
+    // Upper bound: last token with centerY <= bottomY
+    lo = startIdx;
+    hi = this.tokens.length - 1;
+    let endIdx = startIdx;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const y = this._getTokenCenterY(this.tokens[mid]);
+      if (y <= bottomY) {
+        endIdx = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+
+    return {
+      start: Math.max(0, startIdx - 2),
+      end: Math.min(this.tokens.length - 1, endIdx + 8),
+    };
+  }
+
+  /**
+   * Highlights token at `index` and smoothly paces or scrolls it to the camera focus line.
    * Stops rAF completely once settled.
    * @param {number} index
-   * @param {{immediate?: boolean}} [options]
+   * @param {{immediate?: boolean, isRecovery?: boolean}} [options]
    */
-  scrollToToken(index, { immediate = false } = {}) {
+  scrollToToken(index, { immediate = false, isRecovery = false } = {}) {
     if (this.tokens.length === 0) return;
 
     const clamped = Math.max(0, Math.min(index, this.tokens.length - 1));
@@ -328,16 +435,41 @@ export class PrompterEngine {
     const stageRect = this.stageEl.getBoundingClientRect();
     const focusY = stageRect.top + stageRect.height * (this.focusLinePct / 100);
     const tokenY = this._getTokenCenterY(this.tokens[clamped]);
+    const leadOffset = this.voiceTrackingActive ? this.lineHeightPx * 0.28 : 0;
     const desired = Math.max(
       0,
-      Math.min(this.maxScroll, this.stageEl.scrollTop + (tokenY - focusY))
+      Math.min(this.maxScroll, this.stageEl.scrollTop + (tokenY - (focusY - leadOffset)))
     );
 
     if (immediate) {
       this.targetScrollY = null;
+      this.voiceAnchorY = this.voiceTrackingActive ? desired : null;
+      this.voiceVelocity = 0;
       this.virtualScrollY = desired;
       this.lastWrittenScrollTop = desired;
       this.stageEl.scrollTop = desired;
+      return;
+    }
+
+    if (this.voiceTrackingActive) {
+      const now = performance.now();
+      if (!isRecovery && this.lastPaceAnchorY !== null && this.lastPaceTime > 0) {
+        const deltaY = desired - this.lastPaceAnchorY;
+        const elapsedSec = (now - this.lastPaceTime) / 1000;
+        if (deltaY > 12 && deltaY < 320 && elapsedSec > 0.2 && elapsedSec < 6.0) {
+          const measured = Math.max(22, Math.min(190, deltaY / elapsedSec));
+          this.estimatedPacePxPerSec = 0.72 * this.estimatedPacePxPerSec + 0.28 * measured;
+        }
+      }
+
+      this.lastPaceAnchorY = desired;
+      this.lastPaceTime = now;
+      this.lastVoiceMatchTime = now;
+      this.lastSpeechPulseTime = now;
+      this.voiceAnchorY = desired;
+      this.targetScrollY = null;
+      this.virtualScrollY = this.stageEl.scrollTop;
+      this._ensureRaf();
       return;
     }
 
@@ -362,7 +494,11 @@ export class PrompterEngine {
   _handleVisibility() {
     if (document.hidden) {
       this._stopRaf();
-    } else if (this.isPlaying || this.targetScrollY !== null) {
+    } else if (
+      this.isPlaying ||
+      this.targetScrollY !== null ||
+      (this.voiceTrackingActive && this.voiceAnchorY !== null)
+    ) {
       this._ensureRaf();
     }
   }
@@ -398,6 +534,46 @@ export class PrompterEngine {
       return;
     }
 
+    if (this.voiceTrackingActive && this.voiceAnchorY !== null) {
+      const diff = this.voiceAnchorY - this.virtualScrollY;
+      const sinceSpeech = now - Math.max(this.lastVoiceMatchTime, this.lastSpeechPulseTime);
+      const maxLeadPx = this.lineHeightPx * 1.35;
+
+      let desiredVelocity = 0;
+      if (diff > 2) {
+        const maxCatchup = Math.max(260, this.estimatedPacePxPerSec * 2.5);
+        desiredVelocity = Math.min(maxCatchup, diff * 2.8 + this.estimatedPacePxPerSec * 0.45);
+      } else if (diff < -14) {
+        desiredVelocity = Math.max(-240, diff * 3.0);
+      } else if (
+        sinceSpeech < 1300 &&
+        this.virtualScrollY < this.voiceAnchorY + maxLeadPx &&
+        this.virtualScrollY < this.maxScroll
+      ) {
+        const timeDecay = 1 - sinceSpeech / 1300;
+        const leadRatio = Math.max(0, this.virtualScrollY - this.voiceAnchorY) / maxLeadPx;
+        const distDecay = Math.max(0, 1 - leadRatio);
+        desiredVelocity = this.estimatedPacePxPerSec * 0.72 * timeDecay * distDecay;
+      }
+
+      const blend = 1 - Math.exp(-7 * dt);
+      this.voiceVelocity += (desiredVelocity - this.voiceVelocity) * blend;
+
+      if (Math.abs(this.voiceVelocity) < 0.6 && desiredVelocity === 0 && Math.abs(diff) <= 2) {
+        this.voiceVelocity = 0;
+        return; // Halt rAF completely once settled (0% idle CPU)
+      }
+
+      this.virtualScrollY = Math.max(
+        0,
+        Math.min(this.maxScroll, this.virtualScrollY + this.voiceVelocity * dt)
+      );
+      this.lastWrittenScrollTop = this.virtualScrollY;
+      this.stageEl.scrollTop = this.virtualScrollY;
+      this._ensureRaf();
+      return;
+    }
+
     if (this.targetScrollY !== null) {
       const diff = this.targetScrollY - this.virtualScrollY;
       if (Math.abs(diff) < 0.5) {
@@ -419,7 +595,9 @@ export class PrompterEngine {
   _onUserTouchStart() {
     clearTimeout(this.touchReleaseTimer);
     this.isUserTouching = true;
+    this.hasManualScroll = true;
     this.targetScrollY = null;
+    this.voiceVelocity = 0;
   }
 
   _onUserTouchEnd() {
@@ -432,7 +610,9 @@ export class PrompterEngine {
 
   _onWheel() {
     this.isUserTouching = true;
+    this.hasManualScroll = true;
     this.targetScrollY = null;
+    this.voiceVelocity = 0;
     clearTimeout(this.touchReleaseTimer);
     this.touchReleaseTimer = setTimeout(() => {
       this.isUserTouching = false;
@@ -443,13 +623,21 @@ export class PrompterEngine {
 
   _onScroll() {
     const isProgrammatic =
-      (this.isPlaying || this.targetScrollY !== null) &&
+      (this.isPlaying ||
+        this.targetScrollY !== null ||
+        (this.voiceTrackingActive && this.voiceAnchorY !== null && this.rafId !== 0)) &&
       !this.isUserTouching &&
       Math.abs(this.stageEl.scrollTop - this.lastWrittenScrollTop) < 3;
 
     if (isProgrammatic) return;
 
+    this.hasManualScroll = true;
     this.virtualScrollY = this.stageEl.scrollTop;
+    if (this.voiceTrackingActive) {
+      this.voiceAnchorY = null;
+      this.voiceVelocity = 0;
+    }
+
     if (!('onscrollend' in window)) {
       clearTimeout(this.manualSyncTimer);
       this.manualSyncTimer = setTimeout(this._onScrollSettled, 140);
@@ -457,9 +645,16 @@ export class PrompterEngine {
   }
 
   _onScrollSettled() {
-    if (this.isPlaying || this.targetScrollY !== null) return;
+    if (!this.hasManualScroll || this.isPlaying || this.targetScrollY !== null) return;
+    this.hasManualScroll = false;
     this.virtualScrollY = this.stageEl.scrollTop;
     if (this.tokens.length === 0) return;
+
+    this.lastPaceAnchorY = null;
+    this.lastPaceTime = 0;
+    if (this.voiceTrackingActive) {
+      this.voiceAnchorY = this.stageEl.scrollTop;
+    }
 
     const index = this.findTokenAtFocusLine();
     if (index !== this.cursorIndex) {

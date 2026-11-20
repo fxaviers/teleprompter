@@ -132,8 +132,10 @@ const prompter = new PrompterEngine({
 
 const voiceTracker = new VoiceTracker({
   lang: settings.voiceLang,
-  onMatch({ matchedIndex }) {
-    prompter.scrollToToken(matchedIndex);
+  getVisibleRange: () => prompter.getVisibleTokenRange(),
+  onSpeechActivity: () => prompter.notifyVoiceActivity(),
+  onMatch({ matchedIndex, isRecovery }) {
+    prompter.scrollToToken(matchedIndex, { isRecovery });
     scheduleHudAutoHide();
   },
   onInterim(text) {
@@ -142,6 +144,7 @@ const voiceTracker = new VoiceTracker({
     }
   },
   onStatus(status) {
+    prompter.setVoiceTrackingActive(status === 'listening');
     if (status === 'listening') {
       els.voiceChip.hidden = false;
       els.voiceChip.dataset.state = 'listening';

@@ -38,6 +38,26 @@ export function tokenizeText(text) {
   return tokens;
 }
 
+/**
+ * Applies lightweight Portuguese far-field phonetic normalization for longer words
+ * to tolerate 2-meter microphone sibilant/nasal confusions without colliding short words.
+ * @param {string} norm
+ * @returns {string}
+ */
+export function phoneticPt(norm) {
+  if (!norm || norm.length < 4) return norm;
+  return norm
+    .replace(/ch/g, 'x')
+    .replace(/h/g, '')
+    .replace(/qu/g, 'k')
+    .replace(/xc(?=[ei])/g, 's')
+    .replace(/ss/g, 's')
+    .replace(/c(?=[ei])/g, 's')
+    .replace(/g(?=[ei])/g, 'j')
+    .replace(/z/g, 's')
+    .replace(/[rs]$/, '');
+}
+
 function levenshtein(a, b) {
   const m = a.length;
   const n = b.length;
@@ -62,7 +82,7 @@ function levenshtein(a, b) {
 }
 
 /**
- * Computes fuzzy similarity between two normalized words in [0, 1].
+ * Computes fuzzy and far-field Portuguese phonetic similarity between two normalized words in [0, 1].
  * @param {string} a
  * @param {string} b
  * @returns {number}
@@ -73,136 +93,411 @@ export function wordSimilarity(a, b) {
 
   const minLen = Math.min(a.length, b.length);
   const maxLen = Math.max(a.length, b.length);
-  if (minLen < 4 || maxLen - minLen > 2) return 0;
 
-  const dist = levenshtein(a, b);
-  if (dist === 1) return 0.85;
-  if (dist === 2 && minLen >= 6) return 0.75;
+  let best = 0;
+
+  if (minLen >= 4 && maxLen - minLen <= 2) {
+    const dist = levenshtein(a, b);
+    if (dist === 1) best = 0.85;
+    else if (dist === 2 && minLen >= 6) best = 0.75;
+  }
+
+  // Secondary phonetic tier for words >= 5 chars (allows e.g. "falar"/"fala" or "gravassao"/"gravacao")
+  if (maxLen >= 5 && minLen >= 4) {
+    const pa = phoneticPt(a);
+    const pb = phoneticPt(b);
+    if (pa.length >= 4 && pb.length >= 4) {
+      if (pa === pb) {
+        best = Math.max(best, 0.82);
+      } else if (
+        Math.min(pa.length, pb.length) >= 5 &&
+        Math.abs(pa.length - pb.length) <= 1 &&
+        levenshtein(pa, pb) === 1
+      ) {
+        best = Math.max(best, 0.8);
+      }
+    }
+  }
+
+  return best;
+}
+
+function isContentWord(norm) {
+  return Boolean(norm) && !STOPWORDS.has(norm) && norm.length >= 3;
+}
+
+/**
+ * Finds the longest suffix of `prefix` (normalized) that equals a prefix of `words` (normalized).
+ */
+function findOverlapLength(prefixNorms, nextNorms) {
+  const maxCheck = Math.min(prefixNorms.length, nextNorms.length, 12);
+  for (let len = maxCheck; len >= 1; len--) {
+    let matched = true;
+    const offset = prefixNorms.length - len;
+    for (let i = 0; i < len; i++) {
+      if (prefixNorms[offset + i] !== nextNorms[i]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return len;
+  }
   return 0;
 }
 
 /**
- * Matches a tail of recognized words against a sliding window around `cursor`.
- * Prevents single-stopword jumps, bounds jumps to nearby lines, and requires
- * strong multi-word confirmation to backtrack.
+ * Extracts deduplicated spoken alternatives from Web Speech API `event.results`,
+ * stripping cumulative prefix echoes emitted by Chrome on Android.
+ *
+ * @param {ArrayLike<any>} results
+ * @param {number} [resultIndex=0]
+ * @returns {{alternatives: string[][], isFinal: boolean, displayWords: string[]}}
+ */
+export function extractFreshAlternatives(results, resultIndex = 0) {
+  if (!results || results.length === 0) {
+    return { alternatives: [], isFinal: false, displayWords: [] };
+  }
+
+  const safeResultIdx = Math.max(0, Math.min(resultIndex, results.length - 1));
+  const lastIdx = results.length - 1;
+  const startCtx = Math.max(0, safeResultIdx - 1);
+
+  const prefixWords = [];
+  const prefixNorms = [];
+
+  for (let i = startCtx; i < lastIdx; i++) {
+    const rawText = results[i]?.[0]?.transcript || '';
+    const words = rawText.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) continue;
+
+    const norms = words.map(normalizeWord);
+    const overlap = findOverlapLength(prefixNorms, norms);
+    for (let k = overlap; k < words.length; k++) {
+      if (norms[k]) {
+        prefixWords.push(words[k]);
+        prefixNorms.push(norms[k]);
+      }
+    }
+  }
+
+  // Keep only recent context before the newest result
+  const ctxSliceStart = Math.max(0, prefixWords.length - 6);
+  const ctxWords = prefixWords.slice(ctxSliceStart);
+  const ctxNorms = prefixNorms.slice(ctxSliceStart);
+
+  const lastResult = results[lastIdx];
+  const altCount = Math.min(3, lastResult?.length || 0);
+  const alternatives = [];
+  const seenSignatures = new Set();
+
+  for (let a = 0; a < altCount; a++) {
+    const rawAlt = lastResult[a]?.transcript || '';
+    const altWords = rawAlt.trim().split(/\s+/).filter(Boolean);
+    const altNorms = altWords.map(normalizeWord);
+    const overlap = findOverlapLength(ctxNorms, altNorms);
+    const combined = [...ctxWords];
+
+    for (let k = overlap; k < altWords.length; k++) {
+      if (altNorms[k]) {
+        combined.push(altWords[k]);
+      }
+    }
+
+    if (combined.length === 0) continue;
+    const sig = combined.map(normalizeWord).join('|');
+    if (!seenSignatures.has(sig)) {
+      seenSignatures.add(sig);
+      alternatives.push(combined);
+    }
+  }
+
+  let isFinal = true;
+  for (let i = safeResultIdx; i <= lastIdx; i++) {
+    if (!results[i]?.isFinal) {
+      isFinal = false;
+      break;
+    }
+  }
+
+  return {
+    alternatives,
+    isFinal,
+    displayWords: alternatives[0] || [],
+  };
+}
+
+/**
+ * Matches a tail of recognized words against either a tight local tracking window
+ * around `cursor` or a full-viewport `recoveryRange`.
  *
  * @param {Array<{norm: string}>} scriptTokens
  * @param {number} cursor
  * @param {string[]} spokenWords
- * @returns {{matchedIndex: number, confidence: number, matchedCount: number} | null}
+ * @param {{recoveryRange?: {start: number, end: number}}} [options]
+ * @returns {{matchedIndex: number, confidence: number, matchedCount: number, contentMatches: number, score: number} | null}
  */
-export function matchSpokenChunk(scriptTokens, cursor, spokenWords) {
+export function matchSpokenChunk(scriptTokens, cursor, spokenWords, options = {}) {
   if (!scriptTokens?.length || !spokenWords?.length) return null;
 
   const normalizedSpoken = spokenWords
     .map(normalizeWord)
     .filter(Boolean)
-    .slice(-6);
+    .slice(-8);
 
   if (normalizedSpoken.length === 0) return null;
 
+  const isRecovery = Boolean(options.recoveryRange);
   const clampedCursor = Math.max(0, Math.min(cursor, scriptTokens.length - 1));
-  const winStart = Math.max(0, clampedCursor - 6);
-  const winEnd = Math.min(scriptTokens.length - 1, clampedCursor + 35);
+
+  const winStart = isRecovery
+    ? Math.max(0, options.recoveryRange.start)
+    : Math.max(0, clampedCursor - 4);
+  const winEnd = isRecovery
+    ? Math.min(scriptTokens.length - 1, options.recoveryRange.end)
+    : Math.min(scriptTokens.length - 1, clampedCursor + 16);
+
+  if (winStart > winEnd) return null;
 
   let best = null;
 
   for (let j = winStart; j <= winEnd; j++) {
     const targetNorm = scriptTokens[j].norm;
 
-    // Try aligning the newest spoken word (or second-newest if user added a trailing filler)
     for (let tailSkip = 0; tailSkip <= Math.min(1, normalizedSpoken.length - 1); tailSkip++) {
       const sEnd = normalizedSpoken.length - 1 - tailSkip;
-      const anchorSim = wordSimilarity(normalizedSpoken[sEnd], targetNorm);
-      if (anchorSim < 0.75) continue;
 
-      let matchedCount = 1;
-      let simSum = anchorSim;
-      let contentMatches = !STOPWORDS.has(targetNorm) && targetNorm.length >= 3 ? 1 : 0;
+      // Determine anchor match: 1-to-1, 2 spoken words -> 1 compound token, or 1 spoken word -> 2 script tokens
+      const anchorCandidates = [];
 
-      // Walk backwards from (sEnd - 1, j - 1) allowing up to 1 filler/skip gap per step
-      let scriptPos = j - 1;
-      let sPos = sEnd - 1;
-      while (sPos >= 0 && scriptPos >= Math.max(0, j - 10)) {
-        const spokenWord = normalizedSpoken[sPos];
-        let matchedAt = -1;
-        let stepSim = 0;
+      const sim1 = wordSimilarity(normalizedSpoken[sEnd], targetNorm);
+      if (sim1 >= 0.75) {
+        anchorCandidates.push({
+          sim: sim1,
+          spokenConsumed: 1,
+          scriptBackStep: 1,
+          matchedInc: 1,
+          contentInc: isContentWord(targetNorm) ? 1 : 0,
+        });
+      }
 
-        for (let lookback = 0; lookback <= 2 && scriptPos - lookback >= Math.max(0, j - 10); lookback++) {
-          const candNorm = scriptTokens[scriptPos - lookback].norm;
-          const sim = wordSimilarity(spokenWord, candNorm);
-          if (sim >= 0.75) {
-            matchedAt = scriptPos - lookback;
-            stepSim = sim;
-            break;
+      if (sEnd >= 1 && targetNorm.length >= 6) {
+        const mergedSpoken = normalizedSpoken[sEnd - 1] + normalizedSpoken[sEnd];
+        const simCompound = wordSimilarity(mergedSpoken, targetNorm);
+        if (simCompound >= 0.85) {
+          anchorCandidates.push({
+            sim: simCompound,
+            spokenConsumed: 2,
+            scriptBackStep: 2,
+            matchedInc: 2,
+            contentInc: isContentWord(targetNorm) ? 1 : 0,
+          });
+        }
+      }
+
+      if (j >= 1 && normalizedSpoken[sEnd].length >= 6) {
+        const mergedScript = scriptTokens[j - 1].norm + targetNorm;
+        const simSplit = wordSimilarity(normalizedSpoken[sEnd], mergedScript);
+        if (simSplit >= 0.85) {
+          anchorCandidates.push({
+            sim: simSplit,
+            spokenConsumed: 1,
+            scriptBackStep: 2,
+            matchedInc: 2,
+            contentInc:
+              (isContentWord(scriptTokens[j - 1].norm) || isContentWord(targetNorm)) ? 1 : 0,
+          });
+        }
+      }
+
+      for (const anchor of anchorCandidates) {
+        let matchedCount = anchor.matchedInc;
+        let simSum = anchor.sim * anchor.matchedInc;
+        let contentMatches = anchor.contentInc;
+        let earliestScriptIdx = j - (anchor.scriptBackStep === 2 && anchor.spokenConsumed === 1 ? 1 : 0);
+
+        let scriptPos = j - anchor.scriptBackStep;
+        let sPos = sEnd - anchor.spokenConsumed;
+        const minScriptBound = Math.max(0, j - 11);
+
+        while (sPos >= 0 && scriptPos >= minScriptBound) {
+          const spokenWord = normalizedSpoken[sPos];
+          let matched = false;
+
+          // 1) Normal lookback (allow up to 1 skipped word or filler)
+          for (let lookback = 0; lookback <= 2 && scriptPos - lookback >= minScriptBound; lookback++) {
+            const idx = scriptPos - lookback;
+            const candNorm = scriptTokens[idx].norm;
+            const sim = wordSimilarity(spokenWord, candNorm);
+            if (sim >= 0.75) {
+              matchedCount += 1;
+              simSum += sim;
+              if (isContentWord(candNorm)) contentMatches += 1;
+              earliestScriptIdx = Math.min(earliestScriptIdx, idx);
+              scriptPos = idx - 1;
+              sPos -= 1;
+              matched = true;
+              break;
+            }
+          }
+          if (matched) continue;
+
+          // 2) Two spoken words merged into one compound script word
+          if (sPos >= 1) {
+            const mergedSpoken = normalizedSpoken[sPos - 1] + spokenWord;
+            for (let lookback = 0; lookback <= 1 && scriptPos - lookback >= minScriptBound; lookback++) {
+              const idx = scriptPos - lookback;
+              const candNorm = scriptTokens[idx].norm;
+              if (candNorm.length >= 6 && wordSimilarity(mergedSpoken, candNorm) >= 0.85) {
+                matchedCount += 2;
+                simSum += 1.9;
+                if (isContentWord(candNorm)) contentMatches += 1;
+                earliestScriptIdx = Math.min(earliestScriptIdx, idx);
+                scriptPos = idx - 1;
+                sPos -= 2;
+                matched = true;
+                break;
+              }
+            }
+          }
+          if (matched) continue;
+
+          // 3) One spoken word split across two consecutive script words
+          if (spokenWord.length >= 6 && scriptPos - 1 >= minScriptBound) {
+            const mergedScript = scriptTokens[scriptPos - 1].norm + scriptTokens[scriptPos].norm;
+            if (wordSimilarity(spokenWord, mergedScript) >= 0.85) {
+              matchedCount += 2;
+              simSum += 1.9;
+              if (isContentWord(scriptTokens[scriptPos - 1].norm) || isContentWord(scriptTokens[scriptPos].norm)) {
+                contentMatches += 1;
+              }
+              earliestScriptIdx = Math.min(earliestScriptIdx, scriptPos - 1);
+              scriptPos -= 2;
+              sPos -= 1;
+              continue;
+            }
+          }
+
+          sPos -= 1;
+        }
+
+        const span = j - earliestScriptIdx + 1;
+        const delta = j - clampedCursor;
+
+        if (isRecovery) {
+          if (span > matchedCount + 2) continue;
+          const strongEnough =
+            (matchedCount >= 2 && contentMatches >= 2) ||
+            (matchedCount >= 3 && contentMatches >= 1);
+          if (!strongEnough) continue;
+        } else {
+          if (matchedCount === 1) {
+            if (delta < 1 || delta > 4) continue;
+            if (contentMatches === 0 || targetNorm.length < 4 || anchor.sim < 0.85) continue;
+          } else if (matchedCount === 2) {
+            if (delta < 0 || delta > 10 || contentMatches === 0) continue;
+            if (delta === 0 && clampedCursor > 0) continue;
+          } else {
+            // 3+ matched words
+            if (delta >= 0) {
+              if (delta > 16) continue;
+              if (contentMatches === 0) continue;
+            } else {
+              // Deliberate small backtrack requires >= 2 content words within -4..0
+              if (delta < -4 || contentMatches < 2) continue;
+            }
           }
         }
 
-        if (matchedAt !== -1) {
-          matchedCount += 1;
-          simSum += stepSim;
-          const candNorm = scriptTokens[matchedAt].norm;
-          if (!STOPWORDS.has(candNorm) && candNorm.length >= 3) {
-            contentMatches += 1;
+        let score = simSum * 1.4 + matchedCount * 0.85 + contentMatches * 0.7;
+        score -= tailSkip * 0.35;
+
+        if (!isRecovery) {
+          if (delta >= 1 && delta <= 5) {
+            score += 0.75;
+          } else if (delta > 5 && delta <= 10) {
+            score += 0.25 - (delta - 5) * 0.08;
+          } else if (delta > 10) {
+            score -= (delta - 10) * 0.14;
+          } else if (delta < 0) {
+            score -= 0.7 + Math.abs(delta) * 0.15;
           }
-          scriptPos = matchedAt - 1;
+        } else {
+          // Slight bias toward closer visible matches when tied
+          score -= Math.abs(delta) * 0.01;
         }
-        sPos -= 1;
-      }
 
-      const delta = j - clampedCursor;
+        const minScore = isRecovery ? 3.8 : 2.3;
+        if (score < minScore) continue;
 
-      // Guardrails against false jumps and accidental backtracking
-      if (matchedCount === 1) {
-        if (delta < 0) continue; // never backtrack on 1 word
-        if (delta > 12) continue; // never leap far on 1 word
-        if (contentMatches === 0 || targetNorm.length < 4 || anchorSim < 0.85) continue;
-      }
-
-      if (delta < 0 && matchedCount < 2) continue;
-      if (delta < 0 && contentMatches === 0 && matchedCount < 3) continue;
-
-      // Score rewards sequential matches & content words, biases toward small forward steps
-      let score = simSum * 1.4 + matchedCount * 0.8 + contentMatches * 0.65;
-      score -= tailSkip * 0.35;
-
-      if (delta >= 0 && delta <= 8) {
-        score += 0.65;
-      } else if (delta > 8 && delta <= 18) {
-        score -= (delta - 8) * 0.09;
-      } else if (delta > 18) {
-        if (matchedCount < 2) continue;
-        score -= 0.9 + (delta - 18) * 0.16;
-      } else if (delta < 0) {
-        score -= 0.8 + Math.abs(delta) * 0.12;
-      }
-
-      if (!best || score > best.score) {
-        best = {
-          matchedIndex: j,
-          confidence: Math.min(1, simSum / Math.max(1, matchedCount)),
-          matchedCount,
-          score,
-        };
+        if (!best || score > best.score) {
+          best = {
+            matchedIndex: j,
+            confidence: Math.min(1, simSum / Math.max(1, matchedCount)),
+            matchedCount,
+            contentMatches,
+            score,
+          };
+        }
       }
     }
   }
 
-  if (!best || best.score < 2.2) return null;
+  return best;
+}
 
+/**
+ * Evaluates multiple SpeechRecognition alternatives and selects the strongest script match.
+ *
+ * @param {Array<{norm: string}>} scriptTokens
+ * @param {number} cursor
+ * @param {string[][]} alternativeWordLists
+ * @param {{recoveryRange?: {start: number, end: number}}} [options]
+ */
+export function matchAlternatives(scriptTokens, cursor, alternativeWordLists, options = {}) {
+  if (!alternativeWordLists?.length) return null;
+
+  let best = null;
+  for (let i = 0; i < alternativeWordLists.length; i++) {
+    const hit = matchSpokenChunk(scriptTokens, cursor, alternativeWordLists[i], options);
+    if (!hit) continue;
+
+    // Slight preference for higher-ranked speech alternatives on near-ties
+    const adjustedScore = hit.score - i * 0.12;
+    if (
+      !best ||
+      hit.matchedCount > best.matchedCount + 1 ||
+      (Math.abs(hit.matchedCount - best.matchedCount) <= 1 && adjustedScore > best.adjustedScore)
+    ) {
+      best = { ...hit, altIndex: i, adjustedScore };
+    }
+  }
+
+  if (!best) return null;
   return {
     matchedIndex: best.matchedIndex,
     confidence: best.confidence,
     matchedCount: best.matchedCount,
+    contentMatches: best.contentMatches,
+    score: best.score,
+    altIndex: best.altIndex,
   };
 }
 
 /**
  * Wraps the browser Web Speech API (SpeechRecognition / webkitSpeechRecognition)
- * with Android Chrome continuous restart, interim deduplication, and visibility safety.
+ * with Android Chrome cumulative deduplication, multi-alternative scoring,
+ * interim jump capping, and visible-screen deadlock recovery.
  */
 export class VoiceTracker {
-  constructor({ lang = 'pt-BR', onMatch, onInterim, onStatus, onError }) {
+  constructor({
+    lang = 'pt-BR',
+    onMatch,
+    onInterim,
+    onSpeechActivity,
+    getVisibleRange,
+    onStatus,
+    onError,
+  }) {
     this.SpeechRecognitionCtor =
       typeof window !== 'undefined'
         ? window.SpeechRecognition || window.webkitSpeechRecognition
@@ -211,16 +506,24 @@ export class VoiceTracker {
     this.lang = lang;
     this.onMatch = onMatch;
     this.onInterim = onInterim;
+    this.onSpeechActivity = onSpeechActivity;
+    this.getVisibleRange = getVisibleRange;
     this.onStatus = onStatus;
     this.onError = onError;
 
     this.recognition = null;
     this.active = false;
     this.scriptTokens = [];
-    this.cursor = 0;
-    this.backoffMs = 180;
+    this.committedCursor = 0;
+    this.tentativeCursor = 0;
+    this.lastInterimCandidate = -1;
+    this.lastMatchTime = 0;
+    this.unmatchedCount = 0;
+
+    this.backoffMs = 120;
     this.restartTimer = 0;
-    this.lastProcessedTail = '';
+    this.lastTailSignature = '';
+    this.lastWasFinal = false;
     this.pausedByVisibility = false;
 
     this._handleVisibility = this._handleVisibility.bind(this);
@@ -230,15 +533,30 @@ export class VoiceTracker {
     return Boolean(this.SpeechRecognitionCtor);
   }
 
+  get cursor() {
+    return this.tentativeCursor;
+  }
+
   setScriptTokens(tokens) {
     this.scriptTokens = tokens || [];
-    this.cursor = 0;
-    this.lastProcessedTail = '';
+    this.committedCursor = 0;
+    this.tentativeCursor = 0;
+    this.lastInterimCandidate = -1;
+    this.lastMatchTime = 0;
+    this.unmatchedCount = 0;
+    this.lastTailSignature = '';
+    this.lastWasFinal = false;
   }
 
   setCursor(index) {
-    this.cursor = Math.max(0, Math.min(index, Math.max(0, this.scriptTokens.length - 1)));
-    this.lastProcessedTail = '';
+    const clamped = Math.max(0, Math.min(index, Math.max(0, this.scriptTokens.length - 1)));
+    this.committedCursor = clamped;
+    this.tentativeCursor = clamped;
+    this.lastInterimCandidate = clamped;
+    this.lastMatchTime = 0;
+    this.unmatchedCount = 0;
+    this.lastTailSignature = '';
+    this.lastWasFinal = false;
   }
 
   setLang(lang) {
@@ -259,8 +577,10 @@ export class VoiceTracker {
     clearTimeout(this.restartTimer);
     this.active = true;
     this.pausedByVisibility = false;
-    this.backoffMs = 180;
-    this.lastProcessedTail = '';
+    this.backoffMs = 120;
+    this.lastTailSignature = '';
+    this.lastWasFinal = false;
+    this.unmatchedCount = 0;
 
     document.addEventListener('visibilitychange', this._handleVisibility);
     this._createAndStart();
@@ -276,6 +596,7 @@ export class VoiceTracker {
     if (this.recognition) {
       const instance = this.recognition;
       this.recognition = null;
+      instance.onstart = null;
       instance.onresult = null;
       instance.onerror = null;
       instance.onend = null;
@@ -322,39 +643,93 @@ export class VoiceTracker {
     rec.lang = this.lang;
     rec.continuous = true;
     rec.interimResults = true;
-    rec.maxAlternatives = 1;
+    rec.maxAlternatives = 3;
 
     rec.onstart = () => {
+      this.lastTailSignature = '';
+      this.lastWasFinal = false;
       this.onStatus?.('listening');
     };
 
     rec.onresult = (event) => {
-      this.backoffMs = 180;
-      const results = event.results;
-      if (!results || results.length === 0) return;
+      this.backoffMs = 120;
+      const { alternatives, isFinal, displayWords } = extractFreshAlternatives(
+        event.results,
+        event.resultIndex
+      );
 
-      // Combine the latest finalized/interim window from the active session.
-      const startIdx = Math.max(0, event.resultIndex - 1);
-      let transcript = '';
-      for (let i = startIdx; i < results.length; i++) {
-        transcript += ` ${results[i][0]?.transcript || ''}`;
-      }
-      transcript = transcript.trim();
-      if (!transcript) return;
+      if (alternatives.length === 0) return;
 
-      const words = transcript.split(/\s+/).filter(Boolean);
-      const tailSignature = words.slice(-6).map(normalizeWord).join('|');
-      this.onInterim?.(words.slice(-5).join(' '));
+      this.onInterim?.(displayWords.slice(-5).join(' '));
 
-      if (!tailSignature || tailSignature === this.lastProcessedTail) {
+      const tailSignature = alternatives[0].slice(-8).map(normalizeWord).join('|');
+      if (!tailSignature || (tailSignature === this.lastTailSignature && isFinal === this.lastWasFinal)) {
         return;
       }
-      this.lastProcessedTail = tailSignature;
+      this.lastTailSignature = tailSignature;
+      this.lastWasFinal = isFinal;
 
-      const hit = matchSpokenChunk(this.scriptTokens, this.cursor, words);
+      const hit = matchAlternatives(this.scriptTokens, this.tentativeCursor, alternatives);
+
       if (hit) {
-        this.cursor = hit.matchedIndex;
-        this.onMatch?.(hit);
+        const jumpFromCommitted = hit.matchedIndex - this.committedCursor;
+
+        // Prevent unconfirmed single/weak interim bursts from cascading far ahead
+        if (!isFinal && jumpFromCommitted > 8 && !(hit.matchedCount >= 3 && hit.contentMatches >= 2)) {
+          this.onSpeechActivity?.();
+          return;
+        }
+
+        if (isFinal) {
+          this.committedCursor = hit.matchedIndex;
+        } else if (
+          (hit.matchedCount >= 3 && hit.contentMatches >= 2) ||
+          Math.abs(hit.matchedIndex - this.lastInterimCandidate) <= 2
+        ) {
+          this.committedCursor = hit.matchedIndex;
+        }
+
+        this.lastInterimCandidate = hit.matchedIndex;
+        this.tentativeCursor = hit.matchedIndex;
+        this.lastMatchTime = Date.now();
+        this.unmatchedCount = 0;
+
+        this.onSpeechActivity?.();
+        this.onMatch?.({ ...hit, isRecovery: false });
+        return;
+      }
+
+      // No local window match
+      this.unmatchedCount += 1;
+      const timeSinceMatch = this.lastMatchTime > 0 ? Date.now() - this.lastMatchTime : Infinity;
+
+      if (timeSinceMatch < 2000 && this.unmatchedCount < 2) {
+        this.onSpeechActivity?.();
+      }
+
+      if (
+        (this.unmatchedCount >= 2 || timeSinceMatch >= 1800) &&
+        typeof this.getVisibleRange === 'function'
+      ) {
+        const range = this.getVisibleRange();
+        if (range) {
+          const recHit = matchAlternatives(
+            this.scriptTokens,
+            this.tentativeCursor,
+            alternatives,
+            { recoveryRange: range }
+          );
+          if (recHit) {
+            this.committedCursor = recHit.matchedIndex;
+            this.tentativeCursor = recHit.matchedIndex;
+            this.lastInterimCandidate = recHit.matchedIndex;
+            this.lastMatchTime = Date.now();
+            this.unmatchedCount = 0;
+
+            this.onSpeechActivity?.();
+            this.onMatch?.({ ...recHit, isRecovery: true });
+          }
+        }
       }
     };
 
@@ -387,7 +762,7 @@ export class VoiceTracker {
       if (!this.active || document.hidden || this.pausedByVisibility) return;
       clearTimeout(this.restartTimer);
       this.restartTimer = setTimeout(() => {
-        this.backoffMs = Math.min(2000, Math.round(this.backoffMs * 1.6));
+        this.backoffMs = Math.min(1200, Math.round(this.backoffMs * 1.5));
         this._createAndStart();
       }, this.backoffMs);
     };
@@ -396,7 +771,7 @@ export class VoiceTracker {
     try {
       rec.start();
     } catch {
-      this.restartTimer = setTimeout(() => this._createAndStart(), 300);
+      this.restartTimer = setTimeout(() => this._createAndStart(), 250);
     }
   }
 }

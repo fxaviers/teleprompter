@@ -1,4 +1,4 @@
-const CACHE_NAME = 'promptcam-v1';
+const CACHE_NAME = 'promptcam-v2';
 
 const ASSETS = [
   './',
