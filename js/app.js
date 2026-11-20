@@ -11,9 +11,9 @@ import {
   exportScriptTxt,
   importScriptFile,
   estimateReadingStats,
-} from './storage.js';
-import { PrompterEngine } from './prompter.js';
-import { VoiceTracker } from './voice.js';
+} from './storage.js?v=4';
+import { PrompterEngine } from './prompter.js?v=4';
+import { VoiceTracker } from './voice.js?v=4';
 import {
   initInvokerCommandsFallback,
   initDialogClosedByFallback,
@@ -21,7 +21,7 @@ import {
   initSwitchFallback,
   closeDialogAnimated,
   syncRangeSlider,
-} from './ui-polyfills.js';
+} from './ui-polyfills.js?v=4';
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -341,6 +341,7 @@ function applySettingsToUI() {
   root.style.setProperty('--prompt-line-height', String(settings.lineHeight));
   root.style.setProperty('--prompt-margin', `${settings.margin}%`);
   root.style.setProperty('--focus-line-pos', `${settings.focusLine}%`);
+  root.style.setProperty('--focus-line-vh', `${settings.focusLine}dvh`);
 
   if (settings.theme === 'oled') {
     root.removeAttribute('data-theme');
@@ -721,7 +722,8 @@ document.addEventListener('keydown', (event) => {
 
 /* ---------------- PWA Install & Service Worker ---------------- */
 
-const supportsWebInstall = typeof Navigator.prototype.install === 'function';
+const supportsWebInstall =
+  typeof Navigator !== 'undefined' && typeof Navigator.prototype?.install === 'function';
 let relatedAppInstalled = false;
 const DISPLAY_MODE_QUERIES = [
   '(display-mode: standalone)',
@@ -740,6 +742,7 @@ function isInstalledApp() {
 }
 
 function syncInstallButtonVisibility() {
+  if (!els.btnInstall) return;
   if (isInstalledApp()) {
     els.btnInstall.hidden = true;
     return;
@@ -750,7 +753,9 @@ function syncInstallButtonVisibility() {
 }
 
 for (const mq of DISPLAY_MODE_QUERIES) {
-  mq.addEventListener('change', syncInstallButtonVisibility);
+  if (typeof mq.addEventListener === 'function') {
+    mq.addEventListener('change', syncInstallButtonVisibility);
+  }
 }
 
 if (typeof navigator.getInstalledRelatedApps === 'function') {
@@ -778,11 +783,11 @@ window.addEventListener('beforeinstallprompt', (event) => {
 
 window.addEventListener('appinstalled', () => {
   deferredInstallPrompt = null;
-  els.btnInstall.hidden = true;
+  if (els.btnInstall) els.btnInstall.hidden = true;
   announce('PromptCam instalado');
 });
 
-els.btnInstall.addEventListener('click', async () => {
+els.btnInstall?.addEventListener('click', async () => {
   if (els.btnInstall.getAttribute('aria-disabled') === 'true') return;
   els.btnInstall.setAttribute('aria-disabled', 'true');
 
@@ -813,8 +818,17 @@ els.btnInstall.addEventListener('click', async () => {
 });
 
 if ('serviceWorker' in navigator) {
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  let reloadingForSw = false;
+
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloadingForSw) return;
+    reloadingForSw = true;
+    window.location.reload();
+  });
+
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {
+    navigator.serviceWorker.register('./sw.js', { scope: './', updateViaCache: 'none' }).catch(() => {
       // Service worker registration failed (e.g. insecure origin).
     });
   });
@@ -822,10 +836,14 @@ if ('serviceWorker' in navigator) {
 
 /* ---------------- Bootstrap ---------------- */
 
-initInvokerCommandsFallback();
-initDialogClosedByFallback();
-initFocusgroupFallback(els.toolbar);
-initSwitchFallback();
+try {
+  initInvokerCommandsFallback();
+  initDialogClosedByFallback();
+  initFocusgroupFallback(els.toolbar);
+  initSwitchFallback();
+} catch {
+  // Progressive enhancement polyfills must never block script rendering.
+}
 
 applySettingsToUI();
 loadActiveScriptIntoStage();

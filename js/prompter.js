@@ -1,4 +1,4 @@
-import { normalizeWord } from './voice.js';
+import { normalizeWord } from './voice.js?v=4';
 
 const WORD_REGEX = /\p{L}[\p{L}\p{N}'’-]*|\p{N}+/gu;
 

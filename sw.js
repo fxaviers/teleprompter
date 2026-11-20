@@ -1,15 +1,15 @@
-const CACHE_NAME = 'promptcam-v3';
+const CACHE_NAME = 'promptcam-v4';
 
 const ASSETS = [
   './',
   './index.html',
   './manifest.webmanifest',
-  './css/styles.css',
-  './js/app.js',
-  './js/prompter.js',
-  './js/voice.js',
-  './js/storage.js',
-  './js/ui-polyfills.js',
+  './css/styles.css?v=4',
+  './js/app.js?v=4',
+  './js/prompter.js?v=4',
+  './js/voice.js?v=4',
+  './js/storage.js?v=4',
+  './js/ui-polyfills.js?v=4',
   './icons/icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -18,9 +18,17 @@ const ASSETS = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
+    caches.open(CACHE_NAME).then(async (cache) => {
       const urls = ASSETS.map((asset) => new URL(asset, self.registration.scope).href);
-      return cache.addAll(urls);
+      await Promise.all(
+        urls.map(async (url) => {
+          const response = await fetch(new Request(url, { cache: 'reload' }));
+          if (!response.ok) {
+            throw new Error(`Failed to precache ${url}: ${response.status}`);
+          }
+          await cache.put(url, response);
+        })
+      );
     }).then(() => self.skipWaiting())
   );
 });
@@ -46,32 +54,24 @@ self.addEventListener('fetch', (event) => {
 
   event.respondWith(
     caches.open(CACHE_NAME).then(async (cache) => {
-      const cached = await cache.match(request);
+      try {
+        const networkResponse = await fetch(request);
+        if (networkResponse && networkResponse.ok && networkResponse.type === 'basic') {
+          cache.put(request, networkResponse.clone());
+        }
+        return networkResponse;
+      } catch {
+        const cached = await cache.match(request);
+        if (cached) return cached;
 
-      const networkPromise = fetch(request)
-        .then((response) => {
-          if (response && response.ok && response.type === 'basic') {
-            cache.put(request, response.clone());
-          }
-          return response;
-        })
-        .catch(() => null);
+        if (request.mode === 'navigate') {
+          const fallbackUrl = new URL('./index.html', self.registration.scope).href;
+          const fallback = await cache.match(fallbackUrl);
+          if (fallback) return fallback;
+        }
 
-      if (cached) {
-        event.waitUntil(networkPromise);
-        return cached;
+        return Response.error();
       }
-
-      const networkResponse = await networkPromise;
-      if (networkResponse) return networkResponse;
-
-      if (request.mode === 'navigate') {
-        const fallbackUrl = new URL('./index.html', self.registration.scope).href;
-        const fallback = await cache.match(fallbackUrl);
-        if (fallback) return fallback;
-      }
-
-      return Response.error();
     })
   );
 });

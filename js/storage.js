@@ -23,7 +23,7 @@ export const SAMPLE_SCRIPT_TEXT = `Bem-vindo ao PromptCam, seu teleprompter leve
 
 Posicione o texto logo abaixo da borda superior do celular para manter o olhar natural direto para a lente durante toda a gravação.
 
-Você pode ajustar o tamanho da letra, a entrelinha e a posição da linha de foco em tempo real tocando no botão Aa na barra inferior.
+Você pode ajustar o tamanho da letra, a entrelinha e a posição da linha de foco em tempo real tocando no botão Aa no topo da tela.
 
 Para gravar no seu próprio ritmo, ative o ícone do microfone e comece a falar normalmente: o roteiro acompanha suas palavras automaticamente.
 
@@ -87,8 +87,18 @@ export function saveSettings(settings) {
  */
 export function loadScripts() {
   const saved = safeReadJSON(KEYS.scripts, null);
-  if (Array.isArray(saved) && saved.length > 0) {
-    return saved;
+  if (Array.isArray(saved)) {
+    const valid = saved
+      .filter((item) => item && typeof item === 'object' && typeof item.id === 'string')
+      .map((item) => ({
+        id: item.id,
+        title: typeof item.title === 'string' ? item.title : 'Sem título',
+        text: typeof item.text === 'string' ? item.text : '',
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+      }));
+    if (valid.length > 0) {
+      return valid;
+    }
   }
   const initial = createDefaultScripts();
   saveScripts(initial);

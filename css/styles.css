@@ -6,6 +6,7 @@
   --prompt-line-height: 1.45;
   --prompt-margin: 10%;
   --focus-line-pos: 42%;
+  --focus-line-vh: 42dvh;
 
   /* Base OLED Studio Theme */
   --bg: #000000;
@@ -335,8 +336,8 @@ body.hud-hidden .hud > * {
   scrollbar-width: none;
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
-  padding-block-start: var(--focus-line-pos);
-  padding-block-end: calc(100dvh - var(--focus-line-pos));
+  padding-block-start: var(--focus-line-vh);
+  padding-block-end: calc(100dvh - var(--focus-line-vh));
   padding-inline: max(var(--prompt-margin), env(safe-area-inset-left, 0px)) max(var(--prompt-margin), env(safe-area-inset-right, 0px));
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%);
